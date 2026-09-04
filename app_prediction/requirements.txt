@@ -1,0 +1,7 @@
+gradio>=4.0.0
+torchvggish==0.2
+av>=10.0.0
+resampy>=0.4.0
+soundfile>=0.12.0
+# already available in the project venv:
+# tensorflow / keras, torch, opencv-python, numpy, deepface
