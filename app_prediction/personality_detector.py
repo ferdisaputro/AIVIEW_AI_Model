@@ -33,6 +33,8 @@ TRAIN_FEATURES_ROOT = {
     "visual": os.path.join(ROOT, "datasets", "extracted", "Features", "visual", "trainingData"),
 }
 
+EXTRACTED_ROOT = os.path.join(ROOT, "datasets", "extracted")
+
 OCEAN = ["extraversion", "neuroticism", "agreeableness", "conscientiousness", "openness"]
 SEQ_LEN = {"audio": 15, "visual": 30}
 FEAT_DIM = {"audio": 128, "visual": 4096}
@@ -101,8 +103,20 @@ def extract_audio_features(video_path):
     return _pad_trim(emb, SEQ_LEN["audio"], FEAT_DIM["audio"])
 
 
-def extract_visual_features(video_path):
-    """Return (30, 4096) VGG-Face embeddings sampled from a video."""
+def vid_to_vec(video_path, output_dir=None, split="trainingData"):
+    """Extract 30 face-aware VGG-Face embeddings from a video.
+
+    The video is divided into 30 equal-length intervals. For each interval the
+    frames are scanned sequentially and the first frame with a detected face is
+    used. If no face is found across the whole interval, the last successfully
+    detected face is reused as the interval's representation.
+
+    If ``output_dir`` is set, each representation is also persisted as:
+        - image  : ``<output_dir>/ImageData/<split>/<video_id>/frame{i}.jpg``
+        - feature: ``<output_dir>/Features/visual/<split>/<video_id>/feature{i}.npy``
+
+    Returns a ``(30, 4096)`` float32 array of embeddings.
+    """
     import cv2
     from deepface import DeepFace
 
@@ -111,39 +125,76 @@ def extract_visual_features(video_path):
     if total_frames <= 0:
         cap.release()
         raise ValueError("Could not read the video file.")
+
     interval = max(1, total_frames // SEQ_LEN["visual"])
 
-    embeddings, last = [], None
-    for i in range(SEQ_LEN["visual"]):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, i * interval)
-        ok, frame = cap.read()
-        if not ok:
-            break
-        frame = cv2.resize(frame, (480, 240))
-        vec = None
-        try:
-            results = DeepFace.represent(
-                img_path=frame,
-                model_name="VGG-Face",
-                detector_backend="opencv",
-                enforce_detection=True,
-            )
-            vec = np.asarray(results[0]["embedding"], dtype=np.float32).reshape(-1)
-            last = vec
-        except Exception:
-            vec = None
-        if vec is None:
-            if last is None:
+    embeddings = []
+    images = []
+    last_vec = None
+    last_frame = None
+
+    for slot in range(SEQ_LEN["visual"]):
+        slot_start = slot * interval
+        slot_end = min(slot_start + interval, total_frames)
+
+        found = False
+        for frame_idx in range(slot_start, slot_end):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ok, frame = cap.read()
+            if not ok:
                 continue
-            vec = last
+
+            frame = cv2.resize(frame, (480, 240))
+            try:
+                results = DeepFace.represent(
+                    img_path=frame,
+                    model_name="VGG-Face",
+                    detector_backend="opencv",
+                    enforce_detection=True,
+                )
+                vec = np.asarray(results[0]["embedding"], dtype=np.float32).reshape(-1)
+                last_vec = vec
+                last_frame = frame
+                found = True
+                break
+            except Exception:
+                continue
+
+        if not found:
+            if last_vec is None:
+                continue
+            vec = last_vec
+            frame = last_frame
+        else:
+            vec = last_vec
+            frame = last_frame
+
         embeddings.append(vec)
+        images.append(frame)
+
     cap.release()
 
     if not embeddings:
         raise ValueError("No face could be detected in the video.")
 
     arr = np.stack(embeddings, axis=0)
+
+    if output_dir:
+        video_id = os.path.splitext(os.path.basename(video_path))[0]
+        img_dir = os.path.join(output_dir, "ImageData", split, video_id)
+        feat_dir = os.path.join(output_dir, "Features", "visual", split, video_id)
+        os.makedirs(img_dir, exist_ok=True)
+        os.makedirs(feat_dir, exist_ok=True)
+        for i, (img, feat) in enumerate(zip(images, embeddings)):
+            cv2.imwrite(os.path.join(img_dir, f"frame{i}.jpg"), img)
+            np.save(os.path.join(feat_dir, f"feature{i}.npy"), feat)
+
     return _pad_trim(arr, SEQ_LEN["visual"], FEAT_DIM["visual"])
+
+
+def extract_visual_features(video_path):
+    """Return (30, 4096) VGG-Face embeddings sampled from a video."""
+    return vid_to_vec(video_path)
 
 
 def _pad_trim(arr, seq_len, feat_dim):
