@@ -23,17 +23,16 @@ import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(ROOT)
 
 AUDIO_MODEL_PATH = os.path.join(ROOT, "models", "bilstm_audio_tf.keras")
 VISUAL_MODEL_PATH = os.path.join(ROOT, "models", "bilstm_visual_tf.keras")
 STATS_DIR = os.path.join(APP_DIR, "models")
 
 TRAIN_FEATURES_ROOT = {
-    "audio": os.path.join(ROOT, "datasets", "extracted", "Features", "audio", "trainingData"),
-    "visual": os.path.join(ROOT, "datasets", "extracted", "Features", "visual", "trainingData"),
+    "audio": os.path.join(PROJECT_ROOT, "output", "audio", "train"),
+    "visual": os.path.join(PROJECT_ROOT, "output", "visual", "train"),
 }
-
-EXTRACTED_ROOT = os.path.join(ROOT, "datasets", "extracted")
 
 OCEAN = ["extraversion", "neuroticism", "agreeableness", "conscientiousness", "openness"]
 SEQ_LEN = {"audio": 15, "visual": 30}
@@ -209,27 +208,45 @@ def _pad_trim(arr, seq_len, feat_dim):
 # ---------------------------------------------------------------------------
 
 def compute_norm_stats(mod):
-    """Training-set per-dimension mean/std (identical to bilstm_train_tf.ipynb)."""
+    """Training-set per-dimension mean/std (identical to train_blstm.py).
+
+    Two streaming passes (one file at a time) to stay within RAM; stacking all
+    clips first would need ~3x the dataset size for visual (30, 4096).
+    """
     root = TRAIN_FEATURES_ROOT[mod]
-    arrays = []
-    for d in sorted(glob.glob(os.path.join(root, "*"))):
-        if not os.path.isdir(d):
-            continue
-        try:
-            stack = [np.load(os.path.join(d, f"feature{i}.npy"))
-                     for i in range(SEQ_LEN[mod])]
-        except (FileNotFoundError, OSError):
-            continue
-        arr = np.stack(stack, axis=0).astype(np.float32)
-        if arr.shape != (SEQ_LEN[mod], FEAT_DIM[mod]):
-            continue
-        arrays.append(arr)
-    if not arrays:
+    paths = sorted(glob.glob(os.path.join(root, "*.npy")))
+    if not paths:
         raise FileNotFoundError(f"Could not find training features in {root}")
-    x = np.stack(arrays, axis=0)
-    mean = x.mean(axis=(0, 1), keepdims=True)
-    std = x.std(axis=(0, 1), keepdims=True) + 1e-8
-    return mean.reshape(-1).astype(np.float64), std.reshape(-1).astype(np.float64)
+
+    feat_dim = FEAT_DIM[mod]
+
+    def good(arr):
+        return arr.shape == (SEQ_LEN[mod], feat_dim) and np.isfinite(arr).all()
+
+    count = 0
+    s = np.zeros(feat_dim, dtype=np.float64)
+    loaded = []
+    for path in paths:
+        try:
+            arr = np.load(path)
+        except (OSError, ValueError):
+            continue
+        if not good(arr):
+            continue
+        loaded.append(path)
+        s += arr.sum(axis=(0, 1), dtype=np.float64)
+        count += arr.shape[0] * arr.shape[1]
+    if count == 0:
+        raise FileNotFoundError(f"Could not find training features in {root}")
+
+    mean = s / count
+    ss = np.zeros(feat_dim, dtype=np.float64)
+    for path in loaded:
+        arr = np.load(path)
+        d = arr.astype(np.float64) - mean
+        ss += np.sum(d * d, axis=(0, 1))
+    std = np.sqrt(ss / count) + 1e-8
+    return mean, std
 
 
 def save_norm_stats():
