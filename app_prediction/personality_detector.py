@@ -314,6 +314,7 @@ class PersonalityPredictor:
         audio = self._predict(self.audio_model, audio_feat, "audio")
         visual = self._predict(self.visual_model, visual_feat, "visual")
         fused = (audio + visual) / 2.0
+        # fused = visual
         return {
             "audio": {t: float(s) for t, s in zip(OCEAN, audio)},
             "visual": {t: float(s) for t, s in zip(OCEAN, visual)},
